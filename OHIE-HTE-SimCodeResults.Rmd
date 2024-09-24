@@ -1,0 +1,1587 @@
+---
+title: "OHIE simulation"
+author: "Kosuke Inoue"
+date: "2024-09-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = structure(c(CRAN = "http://cran.rstudio.com/")))
+```
+
+```{r}
+###R codes for simulation or replication of Heterogeneous effects of Medicaid coverage on cardiovascular risk factors: secondary analysis of randomized controlled trial
+###BMJ 2024; 386 doi: https://doi.org/10.1136/bmj-2024-079377
+###Last update 2024/9/23
+
+#STEP 1:  Install packages and read data
+#STEP 2:  Clean data for analysis
+#STEP 3:  GRF model for Medicaid-physical health
+#STEP 4:  Calibration plot (sFigure A)
+#STEP 5:  Variable Importance (sFigure B)
+#STEP 6:  Demographic characteristics (Table 1)
+#STEP 7:  High-benefit group for SBP and HbA1c (Table 2, sTable A, sTable B)
+#Step 7s: Distribution of healthcare charges across race and ethnicity (sTable C)
+#STEP 8:  High-benefit approach (Table 3)
+#STEP 9:  Change in outcomes by Medicaid according to Predicted Benefits (Figure 1, sFigure C, sTable D)
+#Step 10: Additional analysis-1. Restricting to those without HTN and DM (sTable E)
+#Step 11: Additional analysis-2. ATE using intent-to-treat analysis (sTable F)
+#Step 12: Additional analysis-3. Healthcare utilization (sTable G)
+#Step 13: Additional analysis-4. Heterogeneity in the effect of Medicaid coverage on diastolic blood pressure and total cholesterol concentrations (sFigure D, sTable H, sTable I)
+#Step 14: Additional analysis-5. Baseline characteristics according to predicted take-up rates (sTable J)
+#Step 15: Additional analysis-6. Difference between counterfactual and actual spending
+```
+
+```{r}
+#####STEP 0-1: Basic information #####
+Sys.time()
+# Get detailed R session and system information
+session_info <- sessionInfo()
+system_info <- Sys.info()
+# Combine the output
+list(session_info = session_info, system_info = system_info)
+
+#####STEP 0-1: Set parameters #####
+bootstraprep <- 10
+seedset <- 777
+seed.ivforest <- c(sbp = 2092883752, a1c = 1233396313,
+                   dbp = 2092883752, chl = 347512607)
+numthreadsset <- min(12, parallel::detectCores()) 
+if (numthreadsset!= 12) {
+  print("the results of grf vary by num.thread (publication paper used num.thread=12)")
+} 
+folds.ivforest <- 20
+rnk.ivforest <- 5
+cat("number of threads (affects grf results):", numthreadsset,"\n")
+
+simulate_data <- 1 
+if (simulate_data == 1) {
+    print("Use the simulated data")
+} else {
+    print("Use the original HTE data for replication")
+    warning("Original data can be downloaded from either NBER or Harvard Dataverse.")
+}
+
+load_impdata <- 0 
+if (load_impdata == 1) {
+    print("The imputed data will be loaded from replication package (recommended when missRanger version is not 2.4.0)")
+} else {
+    print("The data will be imputed through missRanger")
+    warning("To replicate the paper's results, you need to use missRanger 2.4.0 or else set the load_impdata=1 to use the imputations from the paper")
+}
+
+load_ivforest <- 0 
+if (load_ivforest == 1) {
+    print("The IV forest model will be loaded from replication package")
+} else {
+    print("The model will be built through grf")
+    warning("Results may vary across machines due to differences in rounding and representations of floating point numbers; in addition, results will differ with different number of cores")
+}
+
+published_paper_run <- 0
+if (published_paper_run == 1) {
+  print("save intermediate files into both intdat and intdatAsPublished folders")
+  warning("Changing this setting to 1 overwrites the input files required for replicating on different platforms.")
+} else {
+  print("save intermediate files into only intdat folder")
+}
+```
+
+```{r message=FALSE, results="hide"}
+#####STEP 1-1: Install packages #####
+list.of.packages <- c( "grf", "metafor", "splitstackshape", "dplyr", "tidyverse", "foreach", "cowplot", "reshape2", 
+                       "doParallel", "survival", "readstata13", "ggplot2", "rsample", "DiagrammeR", "e1071", "pscl", 
+                       "pROC", "caret", "ModelMetrics", "MatchIt", "Hmisc", "scales", "lmtest", "sandwich",
+                       "haven", "rpms", "randomForest",  "fabricatr", 
+                       "VIM", "mice", "missForest", "lmtest", "missRanger", "ivreg")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+lapply(list.of.packages, library, character.only = TRUE)
+
+print(paste("Version of grf package:", packageVersion("grf"))) 
+print(paste("Version of missRanger package:", packageVersion("missRanger")))
+```
+
+```{r message=FALSE}
+#####STEP 1-2: Read data #####
+library(haven)
+if (simulate_data == 1) {
+  d<-read_dta("datGen/SIMdata_for_analysis.dta")
+} else {
+  d<-read_dta("datImport/data_for_analysis.dta")
+}
+
+ #replace this with "datImport/data_for_analysis.dta" once you download the original file
+d.gf<- d[, which (colnames(d) %in% 
+                    c("person_id", "household_id", "treatment", "numhh_list", 
+                      "ohp_all_ever_inperson", "ohp_all_ever_survey", "ohp_all_ever_admin",
+                      "weight_total_inp",   "age_inp", "gender_inp",  "ast_dx_pre_lottery", 
+                      "dia_dx_pre_lottery", "hbp_dx_pre_lottery", "chl_dx_pre_lottery", 
+                      "ami_dx_pre_lottery", "chf_dx_pre_lottery", "emp_dx_pre_lottery", 
+                      "kid_dx_pre_lottery", "cancer_dx_pre_lottery", "dep_dx_pre_lottery",
+                      "cvd_risk_point",  "charg_tot_pre_ed",  "ed_charg_tot_pre_ed",
+                      "edu_inp", "hispanic_inp", "race_white_inp", "race_black_inp", 
+                      "race_nwother_inp", "a1c_inp", "hdl_inp", "chl_inp", "bmi_inp", 
+                      "bp_sar_inp", "bp_dar_inp", "doc_num_incl_probe_inp",
+                      "a1c_dia", "bp_hyper", "obese" ,"phqtot_high" 
+                    ))]
+#summary(d.gf)
+newd<-d.gf[!is.na(d.gf$age_inp), ] 
+```
+
+```{r}
+#####STEP 2: Clean data for analysis#####
+newd<-newd[(newd$gender_inp==1|newd$gender_inp==0), ] # 1 missing on gender
+newd<-newd[!is.na(newd$age_inp),  ]
+newd<-newd[!is.na(newd$hispanic_inp)&!is.na(newd$race_white_inp)&!is.na(newd$race_black_inp)&!is.na(newd$race_nwother_inp), ] 
+newd$lessHS=0
+newd$lessHS[newd$edu_inp==1]=1 
+newd$HSorGED=0
+newd$HSorGED[newd$edu_inp==2]=1 
+
+#switch 0 and 1 to interpret high CATE/CLATE = high benefit
+newd$randassign<-NA
+newd$randassign[newd$treatment==1]<-0 
+newd$randassign[newd$treatment==0]<-1
+#switch 0 and 1 to interpret high CATE/CLATE = high benefit
+newd$nomedicaid<-NA
+newd$nomedicaid[newd$ohp_all_ever_inperson==1]<-0 
+newd$nomedicaid[newd$ohp_all_ever_inperson==0]<-1
+newd<-newd[!is.na(newd$randassign), ]
+
+newd.bsl<- newd[, which (colnames(newd) %in% 
+                           c( "person_id", 
+                              "age_inp", "gender_inp", "numhh_list", 
+                              "ast_dx_pre_lottery", "dia_dx_pre_lottery", 
+                              "hbp_dx_pre_lottery", "chl_dx_pre_lottery", 
+                              "ami_dx_pre_lottery", "chf_dx_pre_lottery", 
+                              "emp_dx_pre_lottery", "kid_dx_pre_lottery", 
+                              "cancer_dx_pre_lottery", "dep_dx_pre_lottery",
+                              "charg_tot_pre_ed",
+                              "ed_charg_tot_pre_ed",
+                              "lessHS", "HSorGED", "hispanic_inp", "race_white_inp", "race_black_inp", 
+                              "race_nwother_inp" 
+                           ))]
+
+i<-c(1:ncol(newd.bsl))
+newd.bsl[ , i] <- apply(newd.bsl[ , i], 2,         
+                        function(x) as.numeric(as.character(x)))
+
+#vapply(newd.bsl, function(x) mean(!is.na(x)), numeric(1))
+newd.bsl$numhh_list<-as.factor(newd.bsl$numhh_list)
+```
+
+```{r}
+if (load_impdata == 0) {
+  # Random forest imputation for missing covariates
+  library(missRanger)
+  set.seed(Sys.time())  # Set a random seed based on the current time
+  set.seed(seedset)     # Set a specific seed (ensure 'seedset' is defined earlier in your script)
+  newd.preimp <- missRanger(newd.bsl, num.trees = 100, pmm.k = 3, verbose = 0, seed = 123, num.threads = numthreadsset)
+  
+  # Convert 'numhh_list' from factor to numeric
+  newd.preimp$numhh_list <- as.numeric(as.character(newd.preimp$numhh_list))
+} else {
+  # Load pre-imputed data from CSV
+  newd.preimp <- read.csv("intdatAsPublished/intdat_newd.preimp.csv")
+  
+  # Remove the column named 'X' using dplyr's select function
+  newd.preimp <- dplyr::select(newd.preimp, -X)
+}
+```
+
+```{r}
+#Set SBP as an outcome
+newd$outcome<-newd$bp_sar_inp
+newd.out<- newd[, which (colnames(newd) %in% 
+                           c( "person_id", "household_id", "randassign", "outcome",  
+                              "weight_total_inp", "nomedicaid"
+                           ))]
+
+newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+
+# Save intermediate data
+write.csv(newd.preimp, "intdat/intdat_newd.preimp.csv")
+write.csv(newd.imp, "intdat/intdat_newd.imp.csv")
+# Check if published_paper_run equals 1
+if (published_paper_run == 1) {
+  # If true, execute the write.csv function
+  write.csv(newd.preimp, "intdatAsPublished/intdat_newd.preimp.csv")
+  write.csv(newd.imp, "intdatAsPublished/intdat_newd.imp.csv")
+}
+```
+
+```{r}
+#####STEP 3: GRF model for Medicaid-physical health#####
+# Outcome setting
+newd$sbp<-newd$bp_sar_inp
+newd$dbp<-newd$bp_dar_inp
+newd$a1c<-newd$a1c_inp
+target_vars <- c("sbp", "a1c")
+
+#Build forest model for each outcome
+for (vars in target_vars) {
+  newd$outcome<-newd[[vars]]
+  newd.out<- newd[, which (colnames(newd) %in% 
+                             c( "person_id", "household_id", "randassign", "outcome",  "weight_total_inp", "nomedicaid"
+                             ))]
+  
+  newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+  newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+  
+  # Prepare dataset
+  Y <-  (newd.imp$outcome)
+  X <-  dplyr::select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", 
+                                   "weight_total_inp")) 
+  Z <-  as.integer(newd.imp$randassign)
+  W <-  as.integer(newd.imp$nomedicaid)
+  weights<-newd.imp$weight_total_inp
+
+  # Prepare for data.splitting: Assign a fold number to each observation.
+  num.folds <- folds.ivforest
+  n<-nrow(newd.imp)
+  
+  library(grf)
+  set.seed(Sys.time())
+  set.seed(seedset) 
+  folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+  
+  ivmodel <- instrumental_forest(X, Y, W, Z, honesty = TRUE, 
+                                 tune.parameters = "all",
+                                 sample.weights =  weights, 
+                                 num.threads = numthreadsset,
+                                 seed=seed.ivforest[vars], 
+                                 clusters = folds)
+  assign(paste0("iv.forest_", vars), ivmodel, envir = .GlobalEnv)
+}
+# Save objects
+saveRDS(iv.forest_sbp, "intdat/object/iv.forest_sbp.obj")
+saveRDS(iv.forest_a1c, "intdat/object/iv.forest_a1c.obj")
+```
+
+```{r}
+#####Step 4: Calibration plot (sFigure A)#####
+if (load_ivforest == 1) {
+    # Load the necessary RDS files
+    iv.forest_sbp <- readRDS("intdatAsPublished/object/iv.forest_sbp.obj")
+    iv.forest_a1c <- readRDS("intdatAsPublished/object/iv.forest_a1c.obj")
+}
+
+for (vars in target_vars) {
+  newd$outcome<-newd[[vars]]
+  newd.out<- newd[, which (colnames(newd) %in% 
+                             c( "person_id", "household_id", "randassign", "outcome",  "weight_total_inp", "nomedicaid"
+                             ))]
+  newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+  newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+  
+  # Prepare dataset
+  X <-  dplyr::select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", 
+                                   "weight_total_inp")) 
+  # Number of rankings that the predictions will be ranking on 
+  # (e.g., 2 for above/below median estimated CATE, 5 for estimated CATE quintiles, etc.)
+  num.rankings <- rnk.ivforest
+  
+  # Prepare for data.splitting: Assign a fold number to each observation.
+  num.folds <- folds.ivforest
+  n<-nrow(newd.imp)
+  
+  library(grf)
+  set.seed(Sys.time())
+  set.seed(seedset) 
+  folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+  ivmodel <- get(paste0("iv.forest_", vars))
+  
+  ##calculate CLATE for i in fold k
+  priority.cate<-NA
+  for (fold in seq(num.folds)) {
+    priority.cate[folds == fold] <-  predict(ivmodel, X[folds == fold, ])$predictions
+  }
+
+  ##Calibration plot
+  # Rank observations *within each fold* into quintiles according to their CLATE predictions.
+  ranking <- rep(NA, n)
+  for (fold in seq(num.folds)) {
+    tau.hat.quantiles <- quantile(priority.cate[folds == fold], probs = seq(0, 1, by=1/num.rankings))
+    ranking[folds == fold] <- cut(priority.cate[folds == fold], tau.hat.quantiles, include.lowest=TRUE,labels=seq(num.rankings))
+  }
+  
+  # Empty list to hold models
+  models <- list()
+  rnk<-data.frame(1)
+  estimate<-data.frame(1)
+  lowCI<-data.frame(1)
+  highCI<-data.frame(1)
+  # Loop through each ranking 
+  for (i in seq(1, 5, by=1)) {
+    newd_subset <- newd.imp[ranking==i, ]
+    model_subset<-ivreg(outcome~ nomedicaid+ as.factor(numhh_list) +gender_inp +age_inp|randassign+
+                          as.factor(numhh_list) +gender_inp +age_inp , 
+                        weights=weight_total_inp, 
+                        data = newd_subset)
+    coef_target <- summary(model_subset)$coefficients
+    
+    rnk[[paste0("Q", i)]] <- paste0("Q", i)
+    estimate[[paste0("Q", i)]] <- coef_target["nomedicaid", "Estimate"]
+    lowCI[[paste0("Q", i)]]  <- coef_target["nomedicaid", "Estimate"]-1.96*coef_target["nomedicaid", "Std. Error"]
+    highCI[[paste0("Q", i)]]  <- coef_target["nomedicaid", "Estimate"]+1.96*coef_target["nomedicaid", "Std. Error"]
+  }
+  testimate<-data.frame(t(estimate))
+  tlowCI<-data.frame(t(lowCI))
+  thighCI<-data.frame(t(highCI))
+  trnk<-data.frame(t(rnk))
+  cal.plot<-as.data.frame(cbind(trnk, testimate, tlowCI, thighCI))
+  cal.plot <- cal.plot[-1, ]
+  
+  cp<-ggplot(cal.plot) +
+    aes(x = t.rnk., y = t.estimate.) + 
+    geom_point(position=position_dodge(0.2), size=3) +
+    geom_errorbar(aes(ymin=t.highCI., ymax=t.lowCI.), width=.2, position=position_dodge(0.2)) +
+    ylab("Local average treatment effect") + xlab("Ranking of estimated CLATEs") +
+    ggtitle("")+
+    theme_minimal() +
+    theme(legend.position="bottom", legend.title = element_blank())
+  assign(paste0("cp_", vars), cp, envir = .GlobalEnv)
+}
+
+library(ggplot2)
+library(gridExtra)
+cp_all<- grid.arrange(cp_sbp+ ggtitle('Systolic Blood Pressure'), 
+                      cp_a1c+ ggtitle('HbA1c'), 
+                      ncol=1)
+```
+
+```{r}
+#####Step 5: Variable Importance (sFigure B)#####
+target_vars <- c("sbp", "a1c")
+
+for (vars in target_vars) {
+  ivmodel <- get(paste0("iv.forest_", vars))
+  
+  # Extracting variable importance from the model
+  tbl_varImp <- data.frame(Variable = colnames(X), Importance = variable_importance(ivmodel))
+  tbl_varImp <- tbl_varImp[order(tbl_varImp$Importance, decreasing = TRUE), ][1:15, ]
+  
+  # Labeling each covariate 
+  lookup <- c("age_inp" = "Age", "gender_inp" = "Gender", "numhh_list" = "# of people in household", 
+              "ast_dx_pre_lottery" = "Asthma", "dia_dx_pre_lottery" = "Diabetes", 
+              "hbp_dx_pre_lottery" = "Hypertension", "chl_dx_pre_lottery" = "Dyslipidemia", 
+              "ami_dx_pre_lottery" = "Heart Attack", "chf_dx_pre_lottery" = "Heart failure", 
+              "emp_dx_pre_lottery" = "Emphysema/COPD", "kid_dx_pre_lottery" = "Kidney failure", 
+              "cancer_dx_pre_lottery" = "Cancer", "dep_dx_pre_lottery" = "Depression", 
+              "charg_tot_pre_ed" = "Sum of total spending", "ed_charg_tot_pre_ed" = "Sum of ED spending", 
+              "lessHS" = "Less than high school", "HSorGED" = "High school or GED", "hispanic_inp" = "Hispanic", 
+              "race_white_inp" = "Non-Hispanic White", "race_nwother_inp" = "Other race and ethnicities", 
+              "race_black_inp" = "Non-Hispanic Black")
+  
+  tbl_varImp$Variable <- factor(tbl_varImp$Variable, levels = names(lookup))
+  tbl_varImp$Label <- recode(tbl_varImp$Variable, !!!lookup)
+  
+  # Plotting variable importance
+  varImp <- ggplot(tbl_varImp, aes(x = reorder(Label, Importance), y = Importance)) +
+            geom_bar(stat = "identity") +
+            coord_flip() +
+            xlab("Predictors") + ylab("Importance") +
+            ggtitle(paste("Variable Importance for", vars))
+  
+  assign(paste0("varImp_", vars), varImp, envir = .GlobalEnv)
+}
+
+# Combine plots for variable importance into a single layout
+varImp_all <- grid.arrange(
+  get("varImp_sbp") + ggtitle('Variable Importance - SBP'), 
+  get("varImp_a1c") + ggtitle('Variable Importance - HbA1c'), 
+  ncol = 1
+)
+```
+
+```{r}
+#####Step 6: Demographic characteristics (Table 1)#####
+library(tableone)
+newd$outcome <- newd$bp_sar_inp
+newd.out <- newd[, which(colnames(newd) %in% 
+                          c("person_id", "household_id", "randassign", "outcome", "weight_total_inp", "nomedicaid"))]
+
+newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+newd.imp <- newd.imp[!is.na(newd.imp$outcome), ]
+
+newd.table.temp <- newd.imp[, which(colnames(newd.imp) %in% 
+                                c("randassign", "age_inp", "gender_inp", "numhh_list", 
+                                  "ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+                                  "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+                                  "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+                                  "dep_dx_pre_lottery", "charg_tot_pre_ed", "ed_charg_tot_pre_ed",
+                                  "lessHS", "HSorGED", "hispanic_inp", "race_white_inp", 
+                                  "race_black_inp", "race_nwother_inp"))]
+
+catVars <- c("ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+             "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+             "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+             "dep_dx_pre_lottery", "lessHS", "HSorGED", "hispanic_inp", 
+             "race_white_inp", "race_black_inp", "race_nwother_inp")
+newd.table.temp[catVars] <- lapply(newd.table.temp[catVars], factor)
+
+# Labeling each covariate
+lookup <- c("age_inp" = "Age", "gender_inp" = "Gender", "numhh_list" = "# of people in household",
+            "ast_dx_pre_lottery" = "Asthma",   "dia_dx_pre_lottery" = "Diabetes", 
+            "hbp_dx_pre_lottery" = "Hypertension", "chl_dx_pre_lottery" = "Dyslipidemia", 
+            "ami_dx_pre_lottery" = "Heart Attack", "chf_dx_pre_lottery" = "Heart failure", 
+            "emp_dx_pre_lottery" = "Emphysema/COPD", "kid_dx_pre_lottery" = "Kidney failure", 
+            "cancer_dx_pre_lottery" = "Cancer", "dep_dx_pre_lottery" = "Depression", 
+            "charg_tot_pre_ed" = "Sum of total spending", "ed_charg_tot_pre_ed" = "Sum of ED spending", 
+            "lessHS" = "Less than high school",  "HSorGED" = "High school or GED", 
+            "hispanic_inp" = "Hispanic", "race_white_inp" = "Non-Hispanic White", 
+            "race_black_inp" = "Non-Hispanic Black", "race_nwother_inp" = "Other race and ethnicities",
+            "randassign" = "randassign")
+names(newd.table.temp) <- lookup[names(newd.table.temp)]
+newd.table.temp <- na.omit(newd.table.temp)
+
+newd.table.temp$treatment[newd.table.temp$randassign == 1] <- "0"
+newd.table.temp$treatment[newd.table.temp$randassign == 0] <- "1"
+newd.table.temp$Gender <- factor(newd.table.temp$Gender, levels=c("0","1"), labels=c("Male","Female"))
+
+#reorder the variables
+newd.table.temp <- newd.table.temp[, c("Age",  "Gender", "Hispanic", "Non-Hispanic Black",  
+                 "Non-Hispanic White",  "Other race and ethnicities",   
+                 "Less than high school",   "High school or GED", 
+                 "# of people in household", "Sum of total spending", 
+                 "Sum of ED spending", "Asthma", "Diabetes",  
+                 "Hypertension", "Dyslipidemia", "Heart Attack", 
+                 "Heart failure", "Emphysema/COPD", "Kidney failure", 
+                 "Cancer", "Depression", "treatment")]
+
+Table1 <- CreateTableOne(vars = names(newd.table.temp), data = newd.table.temp, strata = "treatment")
+print(Table1) %>%
+  write.csv("output/Table1.csv")
+
+#calculate the number of people who are missing information on charges prior to randomization.
+newd.imp.id <- newd.imp[, which(colnames(newd.imp) %in% 
+                                c("person_id", "randassign"))]
+newd.mis <- merge(newd.imp.id, newd.bsl, by="person_id")
+newd.mis$treatment[newd.mis$randassign == 1] <- "0"
+newd.mis$treatment[newd.mis$randassign == 0] <- "1"
+newd.mis$na_tot<-0
+newd.mis$na_tot[is.na(newd.mis$charg_tot_pre_ed)==TRUE]<-1
+newd.mis$na_ed<-0
+newd.mis$na_ed[is.na(newd.mis$ed_charg_tot_pre_ed)==TRUE]<-1
+newd.mis <- newd.mis[, which(colnames(newd.mis) %in% 
+                                c("treatment", "na_tot", "na_ed"))]
+catVars <- c("treatment", "na_tot", "na_ed")
+newd.mis[catVars] <- lapply(newd.mis[catVars], factor)
+lookup <- c("na_tot" = "Missing on total charges", "na_ed" = "Missing on ED charges",
+            "treatment" = "treatment")
+names(newd.mis) <- lookup[names(newd.mis)]
+Table1_miss <- CreateTableOne(vars = names(newd.mis), data = newd.mis, strata = "treatment")
+print(Table1_miss)
+```
+
+```{r}
+#####Step 7: High-benefit group for SBP and HbA1c (Table 2, sTable A, sTable B)#####
+Table2_all <- CreateTableOne(vars = names(newd.table.temp), data = newd.table.temp)
+print(Table2_all)
+
+#Prepare dataset 
+newd$outcome<-newd[["sbp"]] 
+newd.out<- newd[, which (colnames(newd) %in% 
+                           c( "person_id", "household_id", "randassign", "outcome",  
+                              "weight_total_inp", "nomedicaid"
+                           ))]
+
+newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+
+X <-  dplyr::select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", 
+                                 "weight_total_inp"))
+
+# Assign a fold number to each observation.
+num.folds <- folds.ivforest
+n<-nrow(newd.imp)
+
+for (vars in target_vars) {
+set.seed(Sys.time())
+set.seed(seedset) 
+folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+ivmodel <- get(paste0("iv.forest_", vars))
+tau.hat<-NA
+for (fold in seq(num.folds)) {
+  tau.hat[folds == fold] <-  predict(ivmodel, X[folds == fold, ])$predictions
+}
+
+newd.table.temp <- newd.imp[, which(colnames(newd.imp) %in% 
+                                c("randassign", "age_inp", "gender_inp", "numhh_list", 
+                                  "ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+                                  "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+                                  "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+                                  "dep_dx_pre_lottery", "charg_tot_pre_ed", "ed_charg_tot_pre_ed",
+                                  "lessHS", "HSorGED", "hispanic_inp", "race_white_inp", 
+                                  "race_black_inp", "race_nwother_inp"))]
+
+catVars <- c("ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+             "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+             "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+             "dep_dx_pre_lottery", "lessHS", "HSorGED", "hispanic_inp", 
+             "race_white_inp", "race_black_inp", "race_nwother_inp")
+newd.table.temp[catVars] <- lapply(newd.table.temp[catVars], factor)
+
+# Labeling each covariates
+lookup <- c("age_inp" = "Age", "gender_inp" = "Gender", "numhh_list" = "# of people in household",
+            "ast_dx_pre_lottery" = "Asthma",   "dia_dx_pre_lottery" = "Diabetes", 
+            "hbp_dx_pre_lottery" = "Hypertension", "chl_dx_pre_lottery" = "Dyslipidemia", 
+            "ami_dx_pre_lottery" = "Heart Attack", "chf_dx_pre_lottery" = "Heart failure", 
+            "emp_dx_pre_lottery" = "Emphysema/COPD", "kid_dx_pre_lottery" = "Kidney failure", 
+            "cancer_dx_pre_lottery" = "Cancer", "dep_dx_pre_lottery" = "Depression", 
+            "charg_tot_pre_ed" = "Sum of total spending", "ed_charg_tot_pre_ed" = "Sum of ED spending", 
+            "lessHS" = "Less than high school",  "HSorGED" = "High school or GED", 
+            "hispanic_inp" = "Hispanic", "race_white_inp" = "Non-Hispanic White", 
+            "race_black_inp" = "Non-Hispanic Black", "race_nwother_inp" = "Other race and ethnicities",
+            "randassign" = "randassign")
+
+names(newd.table.temp) <- lookup[names(newd.table.temp)]
+newd.table.temp <- na.omit(newd.table.temp)
+
+#Define high-benefit group based on CLATE
+newd.table.temp$tau.hat<-tau.hat
+newd.table.temp$benefit<-0
+newd.table.temp$benefit[newd.table.temp$tau.hat>0]<-1 #notice this code should be changed based on outcome (increase or decrease)
+newd.table.temp$Gender <- factor(newd.table.temp$Gender, levels=c("0","1"), labels=c("Male","Female"))
+
+##save intermediate data
+save.newd.table.temp<-newd.table.temp
+save.newd.table.temp[] <- lapply(save.newd.table.temp, function(x) {
+  if (is.list(x)) {
+    return(sapply(x, toString))
+  } else {
+    return(x)
+  }
+})
+write.csv(save.newd.table.temp, paste0("intdat/intdat_newd.table.STEP7", vars, ".csv"))
+# Check if published_paper_run equals 1
+if (published_paper_run == 1) {
+  # If true, execute the write.csv function
+  write.csv(save.newd.table.temp, paste0("intdatAsPublished/intdat_newd.table.STEP7", vars, ".csv"))
+}
+
+#reorder the variables
+newd.table.temp <- newd.table.temp[, c("Age",  "Gender", "Hispanic", "Non-Hispanic Black",  
+                 "Non-Hispanic White",  "Other race and ethnicities",   
+                 "Less than high school",   "High school or GED",   
+                 "# of people in household", "Sum of total spending", 
+                 "Sum of ED spending", "Asthma", "Diabetes",  
+                 "Hypertension", "Dyslipidemia", "Heart Attack", 
+                 "Heart failure", "Emphysema/COPD", "Kidney failure", 
+                 "Cancer", "Depression", "benefit")]
+
+#Table 2 shows distribution of covariates among the high benefit group for SBP (the first table of the output) and HbA1c (the second table of the output)
+Table2 <- CreateTableOne(data = newd.table.temp, strata="benefit") 
+  print(Table2) %>%
+    write.csv(paste0("output/Table2_", vars, ".csv"))
+}
+```
+
+```{r}
+#####Step 7s: Distribution of healthcare charges across race and ethnicity (sTable C)#####
+newd.table<- newd.imp[, which (colnames(newd.imp) %in% 
+                                 c( "treatment", #"outcome", 
+                                    "age_inp", "gender_inp", "numhh_list", 
+                                    "ast_dx_pre_lottery", "dia_dx_pre_lottery", 
+                                    "hbp_dx_pre_lottery", "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery", 
+                                    "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery", "dep_dx_pre_lottery",
+                                    "charg_tot_pre_ed",
+                                    "ed_charg_tot_pre_ed",
+                                    "lessHS", "HSorGED", "hispanic_inp", "race_white_inp", "race_black_inp", 
+                                    "race_nwother_inp" 
+                                 ))]
+#vapply(newd.table, function(x) mean(!is.na(x)), numeric(1))
+
+i<-c(1:ncol(newd.table))
+newd.table[ , i] <- apply(newd.table[ , i], 2,         
+                          function(x) as.numeric(as.character(x)))
+newd.table<-na.omit(newd.table)
+
+library(reshape2)
+library(dplyr)
+# Reshaping the data
+long_data <- melt(newd.table, id.vars = c("charg_tot_pre_ed", "ed_charg_tot_pre_ed"),
+                  measure.vars = c("hispanic_inp", "race_white_inp", "race_black_inp", "race_nwother_inp"))
+
+# Filtering and renaming for clarity
+long_data <- long_data[long_data$value == 1, -4]
+long_data$Race <- factor(long_data$variable)
+long_data <- long_data[, -3]
+
+# Calculate mean, standard deviation, median, and IQR
+# Reshaping the data
+long_data <- melt(newd.table, id.vars = c("charg_tot_pre_ed", "ed_charg_tot_pre_ed"),
+                  measure.vars = c("hispanic_inp", "race_white_inp", "race_black_inp", "race_nwother_inp"))
+
+# Filtering and renaming for clarity
+long_data <- long_data[long_data$value == 1, -4]
+long_data$Race <- factor(long_data$variable)
+long_data <- long_data[, -3]
+
+# Calculate statistics
+result1 <- long_data %>%
+  group_by(Race) %>%
+  dplyr::summarize(
+    Mean_charg_tot_pre_ed = mean(charg_tot_pre_ed, na.rm = TRUE),
+    SD_charg_tot_pre_ed = sd(charg_tot_pre_ed, na.rm = TRUE),
+    Median_charg_tot_pre_ed = median(charg_tot_pre_ed, na.rm = TRUE),
+    IQR_charg_tot_pre_ed = IQR(charg_tot_pre_ed, na.rm = TRUE),
+    Perc_charg_tot_pre_ed_gt_0 = sum(charg_tot_pre_ed > 0, na.rm = TRUE) / sum(!is.na(charg_tot_pre_ed)) * 100,
+    Mean_ed_charg_tot_pre_ed = mean(ed_charg_tot_pre_ed, na.rm = TRUE),
+    SD_ed_charg_tot_pre_ed = sd(ed_charg_tot_pre_ed, na.rm = TRUE),
+    Median_ed_charg_tot_pre_ed = median(ed_charg_tot_pre_ed, na.rm = TRUE),
+    IQR_ed_charg_tot_pre_ed = IQR(ed_charg_tot_pre_ed, na.rm = TRUE),
+    Perc_ed_charg_tot_pre_ed_gt_0 = sum(ed_charg_tot_pre_ed > 0, na.rm = TRUE) / sum(!is.na(ed_charg_tot_pre_ed)) * 100
+  )
+print(as.data.frame(result1))
+
+# Define the variables and race pairs
+variables <- c("charg_tot_pre_ed", "ed_charg_tot_pre_ed")
+race_pairs <- list(
+  c("hispanic_inp", "race_black_inp"),
+  c("hispanic_inp", "race_white_inp"),
+  c("hispanic_inp", "race_nwother_inp")
+)
+# Initialize a list to store results
+result2 <- list()
+# Loop through each variable and each pair of race groups
+for (var in variables) {
+  for (pair in race_pairs) {
+    data_subset <- long_data %>%
+      filter(Race %in% pair)
+    test_result <- wilcox.test(reformulate("Race", response = var), data = data_subset)
+    result2[[paste(var, paste(pair, collapse = "_vs_"), sep = "_")]] <- test_result
+  }
+}
+print(result2)
+```
+
+```{r}
+#####Step 8: High-benefit approach (Table 3)#####
+#Prepare dataset
+newd$outcome <- newd[["sbp"]]
+newd.out <- newd[, which(colnames(newd) %in% 
+                         c("person_id", "household_id", "randassign", "outcome", "weight_total_inp", "nomedicaid"))]
+newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+newd.imp <- newd.imp[!is.na(newd.imp$outcome), ]
+
+# Set covariates to calculate CLATE from forest model
+X <- dplyr::select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", "weight_total_inp"))  
+
+num.folds <- folds.ivforest  # The number of folds for cross-validation.
+n <- nrow(newd.imp) 
+
+set.seed(Sys.time())
+set.seed(seedset)  
+folds <- sample(c(1:num.folds), replace=TRUE, size=n) 
+
+# Loading pre-trained IV forest models and predicting treatment effects (CLATE).
+# Calculating CLATE for sbp
+ivmodel <- get(paste0("iv.forest_", "sbp"))
+tau.hat_sbp <- NA  
+for (fold in seq(num.folds)) {
+  tau.hat_sbp[folds == fold] <- predict(ivmodel, X[folds == fold, ])$predictions
+}
+# Calculating CLATE for HbA1c
+ivmodel <- get(paste0("iv.forest_", "a1c"))
+tau.hat_a1c <- NA  
+for (fold in seq(num.folds)) {
+  tau.hat_a1c[folds == fold] <- predict(ivmodel, X[folds == fold, ])$predictions
+}
+
+# Flagging high-benefit groups based on the predicted treatment effects.
+newd.hba <- newd.imp
+newd.hba$tau_sbp <- tau.hat_sbp
+newd.hba$tau_a1c <- tau.hat_a1c
+newd.hba$benefit_sbp <- 0
+newd.hba$benefit_sbp[newd.hba$tau_sbp > 0] <- 1
+newd.hba$benefit_a1c <- 0
+newd.hba$benefit_a1c[newd.hba$tau_a1c > 0] <- 1
+newd.hba$benefit_or <- 0
+newd.hba$benefit_or[newd.hba$tau_sbp > 0 | newd.hba$tau_a1c > 0] <- 1
+newd.hba$benefit_and <- 0
+newd.hba$benefit_and[newd.hba$tau_sbp > 0 & newd.hba$tau_a1c > 0] <- 1
+
+# Merging flagged data  with the original dataset
+newd.hba_all <- merge(newd.hba, newd, by="person_id")
+newd.hba_all$sbp <- newd.hba_all$bp_sar_inp
+newd.hba_all$dbp <- newd.hba_all$bp_dar_inp
+newd.hba_all$a1c <- newd.hba_all$a1c_inp
+names(newd.hba_all) <- sub("\\.x$", "", names(newd.hba_all))  # Cleaning column names from merge artifacts.
+
+# Calculate take-up rates
+# Overall population
+sub.newd.hba_all <- newd.hba_all[newd.hba_all$treatment == 1, ]
+print(mean(sub.newd.hba_all$ohp_all_ever_inperson == 1))
+# High-benefit group for SBP
+sub.newd.hba_sbp <- newd.hba_all[newd.hba_all$benefit_sbp==1 & newd.hba_all$treatment == 1, ]
+print(mean(sub.newd.hba_sbp$ohp_all_ever_inperson == 1))
+# High-benefit group for HbA1c
+sub.newd.hba_a1c <- newd.hba_all[newd.hba_all$benefit_a1c==1 & newd.hba_all$treatment == 1, ]
+print(mean(sub.newd.hba_a1c$ohp_all_ever_inperson == 1))
+
+# Calculate mean (SD) in control group
+# Overall population
+for (var in c("sbp", "dbp", "a1c")) {
+  cat("Mean of", var, ":", mean(newd.hba_all[[var]][newd.hba_all$treatment==0], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_all[[var]][newd.hba_all$treatment==0], na.rm = TRUE), "\n")
+}
+# High-benefit group for SBP
+for (var in c("sbp", "dbp", "a1c")) {
+  cat("Mean of", var, ":", mean(newd.hba_all[[var]][newd.hba_all$treatment==0 & newd.hba_all$benefit_sbp==1], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_all[[var]][newd.hba_all$treatment==0& newd.hba_all$benefit_sbp==1], na.rm = TRUE), "\n")
+}
+# High-benefit group for HbA1c
+for (var in c("sbp", "dbp", "a1c")) {
+  cat("Mean of", var, ":", mean(newd.hba_all[[var]][newd.hba_all$treatment==0& newd.hba_all$benefit_a1c==1], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_all[[var]][newd.hba_all$treatment==0& newd.hba_all$benefit_a1c==1], na.rm = TRUE), "\n")
+}
+
+# Save intermediate data
+write.csv(newd.hba_all, "intdat/intdat_newd.hba_all.csv")
+# Check if published_paper_run equals 1
+if (published_paper_run == 1) {
+  # If true, execute the write.csv function
+  write.csv(newd.hba_all, "intdatAsPublished/intdat_newd.hba_all.csv")
+}
+
+# Empty list to hold models
+models <- list()
+hba <- data.frame(1)
+estimate <- data.frame(1)
+difference <- data.frame(1)
+
+# Define a function for bootstrapping
+boot_hba = function(d) {
+    formula_str <- paste(vars, "~ nomedicaid + as.factor(numhh_list) + gender_inp + age_inp | randassign + as.factor(numhh_list) + gender_inp + age_inp")
+  
+    # Estimating LATE according to strategies (population approach, high-benefit approach)
+    model1 <- ivreg(formula_str, data = d, weights = weight_total_inp)
+    model2 <- ivreg(formula_str, data = d[d$benefit_sbp == 1, ],   weights = weight_total_inp)
+    model3 <- ivreg(formula_str, data = d[d$benefit_a1c == 1, ],   weights = weight_total_inp)
+    model4 <- ivreg(formula_str, data = d[d$benefit_or == 1, ],   weights = weight_total_inp)
+    model5 <- ivreg(formula_str, data = d[d$benefit_and == 1, ],   weights = weight_total_inp)
+  
+    # Store results for each model.
+    for (i in seq(1, 5, by=1)) {
+      model <- get(paste0("model", i))
+      coef_target <- summary(model)$coefficients
+      coef_all <- summary(model1)$coefficients
+      hba[[i]] <- paste0("model", i)
+      estimate[[paste0("model", i)]] <- coef_target["nomedicaid", "Estimate"]*(-1)
+      difference[[paste0("model", i)]] <- coef_target["nomedicaid", "Estimate"]*(-1) - coef_all["nomedicaid", "Estimate"]*(-1)
+    }
+    testimate <- data.frame(t(estimate))
+    testimate <- testimate[-1, ]
+    tdifference <- data.frame(t(difference))
+    tdifference <- tdifference[-1, ]
+    thba <- data.frame(t(hba))
+    diff.hba <- as.data.frame(cbind(thba, testimate, tdifference))
+    diff.hba$t.hba. <- factor(diff.hba$t.hba., levels = paste0("model", i), ordered = TRUE)
+    flattened_diff.hba <- as.vector(unlist(diff.hba))
+    results <- flattened_diff.hba[6:15]
+    return(results)
+}
+
+# Function for bootstrapping 
+boot = function(d) {
+    return(d[sample(1:dim(d)[1], replace=TRUE), ])
+}
+
+# Apply the bootstrapping to estimate LATE for population approach, high-benefit approach for SBP, and high-benefit approach for HbA1c
+for (vars in c("sbp", "dbp", "a1c")) {
+  set.seed(seedset)  # Seed setting for reproducibility.
+  RD = replicate(bootstraprep, boot_hba(boot(newd.hba_all)))
+  results_est <- boot_hba(newd.hba_all)
+  results_ci <- apply(RD, 1, quantile, c(0.025,  0.975))
+  results <- rbind(results_est, results_ci)
+  assign(paste0("results_", vars), results, envir = .GlobalEnv)
+  select <- results[,c(1, 2, 3, 7, 8)]
+  colnames(select) <- c("overall", "HBA for SBP", "HBA for HbA1c", "Diff for SBP", "Diff for HbA1c")
+  print(select) %>%
+    write.csv(paste0("output/results_", vars, ".csv"))
+}
+```
+
+```{r}
+#####Step 9-1: Change in outcomes by Medicaid according to Predicted Benefits (Figure 1, sFigure C, sTable D)#####
+# Define a function for bootstrapping across varying percentiles of predicted benefits.
+boot_ivforest = function(d){
+  # Loop through the designated percentiles from high to low.
+  for (i in seq(80, 0, by=-10)) {
+    # Calculate the actual percentile threshold for priority.cate.
+    p <- quantile(d$priority.cate, i / 100)
+    
+    # Subset the data to include only those above the calculated percentile.
+    df_subset <- d[d$priority.cate > p, ]
+
+    # Perform IV regression within the subset to estimate the impact of Medicaid.
+    model_target <- ivreg(outcome ~ nomedicaid + as.factor(numhh_list) + gender_inp + age_inp | randassign +
+                          as.factor(numhh_list) + gender_inp + age_inp, 
+                          data = df_subset,   weights = weight_total_inp)
+    # Compare against the reference model using the full data set.
+    model_all <- ivreg(outcome ~ nomedicaid + as.factor(numhh_list) + gender_inp + age_inp | randassign +
+                       as.factor(numhh_list) + gender_inp + age_inp, 
+                       data = d,  weights = weight_total_inp)
+    
+    # Store the coefficients from both models for comparison.
+    coef_target <- summary(model_target)$coefficients
+    coef_all <- summary(model_all)$coefficients
+    percentile[[paste0(100-i, "th")]] <- paste0(100-i, "th")
+    estimate[[paste0(100-i, "th")]] <- coef_target["nomedicaid", "Estimate"]
+    difference[[paste0(100-i, "th")]] <- coef_target["nomedicaid", "Estimate"] - coef_all["nomedicaid", "Estimate"]
+  }
+  # Prepare the results for visualization.
+  testimate <- data.frame(t(estimate))
+  tdifference <- data.frame(t(difference))
+  tpct <- data.frame(t(percentile))
+  rate.plot <- as.data.frame(cbind(tpct, testimate, tdifference))
+  rate.plot <- rate.plot[-1, ]
+  rate.plot$t.percentile. <- factor(rate.plot$t.percentile., levels = paste0(seq(20, 100, 10), "th"), ordered = TRUE)
+  flattened_rate_plot <- as.vector(unlist(rate.plot))
+  results <- flattened_rate_plot[10:27]
+  return(results)
+}
+
+# Apply the function to different outcome variables.
+for (vars in target_vars) {
+  newd$outcome <- newd[[vars]]
+  newd.out <- newd[, which(colnames(newd) %in% 
+                             c("person_id", "household_id", "randassign", "outcome", "weight_total_inp", "nomedicaid"))]
+  
+  # Merge pre-imputed and outcome-focused data.
+  newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+  newd.imp <- newd.imp[!is.na(newd.imp$outcome), ]
+  
+  # Set covariates to calculate CLATE from forest model
+  X <- dplyr::select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", "weight_total_inp"))
+
+  # Set folds
+  num.folds <- folds.ivforest
+  n <- nrow(newd.imp)
+  
+  # Assign samples to each fold.
+  set.seed(Sys.time())
+  set.seed(seedset)
+  folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+  ivmodel <- get(paste0("iv.forest_", vars))
+  priority.cate <- NA
+  for (fold in seq(num.folds)) {
+    priority.cate[folds == fold] <- predict(ivmodel, X[folds == fold, ])$predictions
+  }
+  newd.boot <- newd.imp
+  newd.boot$priority.cate <- priority.cate
+  
+  # Empty list to hold models
+  models <- list()
+  percentile<-data.frame(1)
+  estimate<-data.frame(1)
+  difference<-data.frame(1)
+  
+  set.seed(seedset)
+  RD = replicate(bootstraprep, boot_ivforest(boot(newd.boot)))  
+  late_all_est <- boot_ivforest(newd.boot)
+  late_all_ci <- apply(RD, 1, quantile, c(0.025,  0.975))
+  late_all <- rbind(late_all_est, late_all_ci)
+  late_all.plot<-as.data.frame(t(late_all))
+  labels <- paste0(seq(20, 100, 10), "th")
+  labels <- rep(labels, 2)
+  late_all.plot$labels<-labels
+
+  # Store and visualize the analysis results.
+  write.csv(late_all.plot, paste0("output/late_", vars, ".plot.csv"))
+  
+  # Plotting the results.
+  late_est.plot <- late_all.plot[1:9, ]
+  late_diff.plot <- late_all.plot[10:18, ]
+  late_est.plot$labels <- factor(late_est.plot$labels, levels = paste0(seq(20, 100, 10), "th"), ordered = TRUE)
+  late_diff.plot$labels <- factor(late_diff.plot$labels, levels = paste0(seq(20, 100, 10), "th"), ordered = TRUE)
+  
+  if (vars == "sbp") {
+    y_label <- "Change in systolic blood pressure by Medicaid"
+    x_label <- "Percentile rank of predicted benefit from Medicaid coverage"
+  } else if (vars == "a1c") {
+    y_label <- bquote("Change in " *HbA["1c"]* " by Medicaid")
+    x_label <- "Percentile rank of predicted benefit from Medicaid coverage"
+  } 
+  
+  # Create and assign plots for estimated LATE and difference from the reference model (population approach)
+  cp_est <- ggplot(late_est.plot) +
+    aes(x = labels, y = late_all_est*(-1)) +
+    geom_point(position=position_dodge(0.2), size=3) +
+    geom_errorbar(aes(ymin=`2.5%`*(-1), ymax=`97.5%`*(-1)), width=.2, position=position_dodge(0.2)) +
+    ylab(y_label) + xlab(x_label) +  ggtitle("")+
+    theme_minimal() +
+    theme(legend.position="bottom", legend.title = element_blank())
+  assign(paste0("cp_est_", vars), cp_est, envir = .GlobalEnv)
+  
+  cp_diff <- ggplot(late_diff.plot) +
+    aes(x = labels, y = late_all_est*(-1)) +
+    geom_point(position=position_dodge(0.2), size=3) +
+    geom_errorbar(aes(ymin=`2.5%`*(-1), ymax=`97.5%`*(-1)), width=.2, position=position_dodge(0.2)) +
+    ylab("Difference in Local average treatment effect") + xlab("Percentiles of Medicaid coverage") +
+    ggtitle("") +
+    theme_minimal() +
+    theme(legend.position="bottom", legend.title = element_blank())
+  assign(paste0("cp_diff_", vars), cp_diff, envir = .GlobalEnv)
+}
+
+library(ggplot2)
+library(gridExtra)
+## Plot the graph (Figure 1)
+cp_rate_est_boot <- grid.arrange(cp_est_sbp + ggtitle('Systolic Blood Pressure') + geom_hline(aes(yintercept=0), color="red", linetype="dashed"), 
+                                cp_est_a1c +  ggtitle(bquote(HbA["1c"])) + geom_hline(aes(yintercept=0), color="red", linetype="dashed"), 
+                                ncol=1)
+
+## Plot the graph (sFigure C)
+cp_diff_est_boot <- grid.arrange(cp_diff_sbp + ggtitle('Systolic Blood Pressure') + geom_hline(aes(yintercept=0), color="red", linetype="dashed"), 
+                                cp_diff_a1c +  ggtitle(bquote(HbA["1c"])) + geom_hline(aes(yintercept=0), color="red", linetype="dashed"), 
+                                ncol=1)
+```
+
+
+```{r}
+#####Step 9-2: Change in outcomes by Medicaid according to Predicted Benefits (sTable D)#####
+# Calculate take-up rate for top 30th and 50th percentiles.
+for (vars in target_vars) {
+  newd$outcome <- newd[[vars]]
+  newd.out <- newd[, which(colnames(newd) %in% 
+                             c("person_id", "household_id", "randassign", "outcome", "weight_total_inp", "nomedicaid"))]
+  
+  # Merge pre-imputed and outcome-focused data.
+  newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+  newd.imp <- newd.imp[!is.na(newd.imp$outcome), ]
+  
+  # Set covariates to calculate CLATE from forest model
+  X <- dplyr::select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", "weight_total_inp"))
+
+  # Set folds
+  num.folds <- folds.ivforest
+  n <- nrow(newd.imp)
+  
+  # Assign samples to each fold.
+  set.seed(Sys.time())
+  set.seed(seedset)
+  folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+  ivmodel <- get(paste0("iv.forest_", vars))
+  priority.cate <- NA
+  for (fold in seq(num.folds)) {
+    priority.cate[folds == fold] <- predict(ivmodel, X[folds == fold, ])$predictions
+  }
+  newd.takeup <- newd.imp
+  newd.takeup$priority.cate <- priority.cate
+  
+percentiles <- c(50, 70)
+for (i in percentiles) {
+  # Calculate the quantile for the current percentile
+  p <- quantile(newd.takeup$priority.cate, i / 100)
+  # Subset the data to include only those above the calculated percentile
+  newd.takeup_subset <- newd.takeup[newd.takeup$priority.cate > p, ]
+  # Merge with the additional data
+  prenewd.takeup <- newd[, which(colnames(newd) %in% c("person_id", "ohp_all_ever_inperson"))]
+  newd.takeup_all <- merge(newd.takeup_subset, prenewd.takeup, by="person_id")
+  # Filter for control group and calculate mean
+  newd.takeup_trt <- newd.takeup_all[newd.takeup_all$randassign == 0, ]
+  take_up_rate <- mean(newd.takeup_trt$ohp_all_ever_inperson == 1)
+  # Print the result for the current percentile
+  cat(sprintf("Take-up rate for %s at the %dth percentile is: %f\n", vars, 100-i, take_up_rate))
+}
+}
+
+```
+
+
+```{r}
+#####Step 10: Additional analysis-1. Restricting to those without HTN and DM (sTable E)#####
+newd.hba_rest<-newd.hba_all[newd.hba_all$hbp_dx_pre_lottery==0 & newd.hba_all$dia_dx_pre_lottery==0, ]
+
+nrow(newd.hba_rest)
+nrow(newd.hba_rest[newd.hba_rest$benefit_sbp==1, ])
+nrow(newd.hba_rest[newd.hba_rest$benefit_a1c==1, ])
+
+# Calculate take-up rates
+# Overall population
+sub.newd.hba_rest <- newd.hba_rest[newd.hba_rest$treatment == 1, ]
+print(mean(sub.newd.hba_rest$ohp_all_ever_inperson == 1))
+# High-benefit group for SBP
+sub.newd.hba_sbp <- sub.newd.hba_rest[sub.newd.hba_rest$benefit_sbp==1 & sub.newd.hba_rest$treatment == 1, ]
+print(mean(sub.newd.hba_sbp$ohp_all_ever_inperson == 1))
+# High-benefit group for HbA1c
+sub.newd.hba_a1c <- sub.newd.hba_rest[sub.newd.hba_rest$benefit_a1c==1 & sub.newd.hba_rest$treatment == 1, ]
+print(mean(sub.newd.hba_a1c$ohp_all_ever_inperson == 1))
+
+for (var in c("sbp", "dbp", "a1c")) {
+  cat("Mean of", var, ":", mean(newd.hba_rest[[var]][newd.hba_rest$treatment==0], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_rest[[var]][newd.hba_rest$treatment==0], na.rm = TRUE), "\n")
+}
+for (var in c("sbp", "dbp", "a1c")) {
+  cat("Mean of", var, ":", mean(newd.hba_rest[[var]][newd.hba_rest$treatment==0& newd.hba_rest$benefit_sbp==1], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_rest[[var]][newd.hba_rest$treatment==0& newd.hba_rest$benefit_sbp==1], na.rm = TRUE), "\n")
+}
+for (var in c("sbp", "dbp", "a1c")) {
+  cat("Mean of", var, ":", mean(newd.hba_rest[[var]][newd.hba_rest$treatment==0& newd.hba_rest$benefit_a1c==1], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_rest[[var]][newd.hba_rest$treatment==0& newd.hba_rest$benefit_a1c==1], na.rm = TRUE), "\n")
+}
+
+models <- list()
+hba<-data.frame(1)
+estimate<-data.frame(1)
+difference<-data.frame(1)
+
+for (vars in c("sbp", "dbp", "a1c")) {
+  set.seed(seedset)
+  RD = replicate(bootstraprep, boot_hba(boot(newd.hba_rest)))  
+  results_est<-boot_hba(newd.hba_rest)
+  results_ci<-apply(RD, 1, quantile, c(0.025,  0.975))
+  results<-rbind(results_est, results_ci)
+  assign(paste0("rest_results_", vars), results, envir = .GlobalEnv)
+  select <- results[,c(1, 2, 3, 7, 8)]
+  colnames(select) <- c("overall", "HBA for SBP", "HBA for HbA1c", "Diff for SBP", "Diff for HbA1c")
+  print(select) %>%
+    write.csv(paste0("output/rest_results_", vars, ".csv"))
+}
+```
+
+
+```{r}
+#####Step 11: Additional analysis-2. ATE using intent-to-treat analysis (sTable F)#####
+# Take-up rates and mean (SD) in control group can be found in Table 3 (Step 8)
+models <- list()
+hba<-data.frame(1)
+estimate<-data.frame(1)
+difference<-data.frame(1)
+
+boot_hba_ate =function(d){
+  formula_str <- paste(vars, "~  randassign + as.factor(numhh_list) + gender_inp + age_inp")
+
+  model1<-(lm( formula_str , data=d,
+               weights=weight_total_inp
+  ))
+  model2<-(lm( formula_str , data=d[d$benefit_sbp==1, ],
+               weights=weight_total_inp
+  ))
+  model3<-(lm( formula_str , data=d[d$benefit_a1c==1, ],
+               weights=weight_total_inp
+  ))
+  model4<-(lm( formula_str  , data=d[d$benefit_or==1, ],
+               weights=weight_total_inp
+  ))
+  model5<-(lm( formula_str  , data=d[d$benefit_and==1, ],
+               weights=weight_total_inp
+  ))
+  
+  for (i in seq(1, 5, by=1)) {
+    model <- get(paste0("model", i))
+    coef_target <- summary(model)$coefficients
+    coef_all <- summary(model1)$coefficients
+    hba[[i]] <- paste0("model", i)
+    estimate[[paste0("model", i)]] <- coef_target["randassign", "Estimate"]*(-1)
+    difference[[paste0("model", i)]] <- coef_target["randassign", "Estimate"]*(-1)-coef_all["randassign", "Estimate"]*(-1)
+  }
+  testimate<-data.frame(t(estimate))
+  testimate<-testimate[-1, ]
+  tdifference<-data.frame(t(difference))
+  tdifference<-tdifference[-1, ]
+  thba<-data.frame(t(hba))
+  diff.hba<-as.data.frame(cbind(thba, testimate,tdifference))
+  diff.hba$t.hba. <- factor(diff.hba$t.hba., levels = paste0("model", i), ordered = TRUE)
+  flattened_diff.hba <- as.vector(unlist(diff.hba))
+  results<-flattened_diff.hba[6:15]
+  return(results)
+}
+
+for (vars in c("sbp", "dbp", "a1c")) {
+  set.seed(seedset)
+  RD = replicate(bootstraprep, boot_hba_ate(boot(newd.hba_all)))  
+  results_est<-boot_hba_ate(newd.hba_all)
+  results_ci<-apply(RD, 1, quantile, c(0.025,  0.975))
+  results<-rbind(results_est, results_ci)
+  assign(paste0("results_", vars), results, envir = .GlobalEnv)
+  select <- results[,c(1, 2, 3, 7, 8)]
+  colnames(select) <- c("overall", "HBA for SBP", "HBA for HbA1c", "Diff for SBP", "Diff for HbA1c")
+  print(select) %>%
+    write.csv(paste0("output/ATEresults_", vars, ".csv"))
+}
+```
+
+```{r}
+#####Step 12: Additional analysis-3. Healthcare utilization (sTable G)#####
+# Take-up rates and mean (SD) in control group can be found in Table 3 (Step 8)
+d_utilization<- d[, which (colnames(d) %in% 
+                             c("person_id", "rx_num_mod_inp", "doc_num_mod_inp"
+                             ))]
+#rx_num_mod_inp  = number of prescriptions
+#doc_num_mod_inp = office visits in the past 12 months
+newd.hba_utilization <- left_join(newd.hba_all, d_utilization, by="person_id")
+
+# Overall population
+for (var in c("rx_num_mod_inp", "doc_num_mod_inp")) {
+  cat("Mean of", var, ":", mean(newd.hba_utilization[[var]][newd.hba_utilization$treatment==0], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_utilization[[var]][newd.hba_utilization$treatment==0], na.rm = TRUE), "\n")
+}
+
+# High-benefit group for SBP
+for (var in c("rx_num_mod_inp", "doc_num_mod_inp")) {
+  cat("Mean of", var, ":", mean(newd.hba_utilization[[var]][newd.hba_utilization$treatment==0& newd.hba_utilization$benefit_sbp==1], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_utilization[[var]][newd.hba_utilization$treatment==0& newd.hba_utilization$benefit_sbp==1], na.rm = TRUE), "\n")
+}
+
+# High-benefit group for HbA1c
+for (var in c("rx_num_mod_inp", "doc_num_mod_inp")) {
+  cat("Mean of", var, ":", mean(newd.hba_utilization[[var]][newd.hba_utilization$treatment==0& newd.hba_utilization$benefit_a1c==1], na.rm = TRUE), "\n")
+  cat("Standard Deviation of", var, ":", sd(newd.hba_utilization[[var]][newd.hba_utilization$treatment==0& newd.hba_utilization$benefit_a1c==1], na.rm = TRUE), "\n")
+}
+
+models <- list()
+hba<-data.frame(1)
+estimate<-data.frame(1)
+difference<-data.frame(1)
+
+boot_util =function(d){
+  formula_str <- paste(util, "~ nomedicaid + as.factor(numhh_list) + gender_inp + age_inp | randassign + as.factor(numhh_list) + gender_inp + age_inp")
+
+  model1<-(ivreg( formula_str , data=d,
+                  weights=weight_total_inp
+  ))
+  model2<-(ivreg( formula_str , data=d[d$benefit_sbp==1, ],
+                  weights=weight_total_inp
+  ))
+  model3<-(ivreg( formula_str , data=d[d$benefit_a1c==1, ],
+                  weights=weight_total_inp
+  ))
+  model4<-(ivreg( formula_str  , data=d[d$benefit_or==1, ],
+                  weights=weight_total_inp
+  ))
+  model5<-(ivreg( formula_str  , data=d[d$benefit_and==1, ],
+                  weights=weight_total_inp
+  ))
+  
+  for (i in seq(1, 5, by=1)) {
+    model <- get(paste0("model", i))
+    coef_target <- summary(model)$coefficients
+    coef_all <- summary(model1)$coefficients
+    hba[[i]] <- paste0("model", i)
+    estimate[[paste0("model", i)]] <- coef_target["nomedicaid", "Estimate"]*(-1)
+    difference[[paste0("model", i)]] <- coef_target["nomedicaid", "Estimate"]*(-1)-coef_all["nomedicaid", "Estimate"]*(-1)
+  }
+  testimate<-data.frame(t(estimate))
+  testimate<-testimate[-1, ]
+  tdifference<-data.frame(t(difference))
+  tdifference<-tdifference[-1, ]
+  thba<-data.frame(t(hba))
+  diff.hba<-as.data.frame(cbind(thba, testimate,tdifference))
+  diff.hba$t.hba. <- factor(diff.hba$t.hba., levels = paste0("model", i), ordered = TRUE)
+  flattened_diff.hba <- as.vector(unlist(diff.hba))
+  results<-flattened_diff.hba[6:15]
+  return(results)
+}
+
+for (util in c("rx_num_mod_inp", "doc_num_mod_inp")) {
+  set.seed(seedset)
+  RD = replicate(bootstraprep, boot_util(boot(newd.hba_utilization)))  
+  results_est<-boot_util(newd.hba_utilization)
+  results_ci<-apply(RD, 1, quantile, c(0.025,  0.975))
+  results<-rbind(results_est, results_ci)
+  assign(paste0("results_", util), results, envir = .GlobalEnv)
+  select <- results[,c(1, 2, 3, 7, 8)]
+  colnames(select) <- c("overall", "HBA for SBP", "HBA for HbA1c", "Diff for SBP", "Diff for HbA1c")
+  print(select) %>%
+    write.csv(paste0("output/results_", util, ".csv"))
+}
+```
+
+```{r}
+#####Step 13-1: Additional analysis-4. Heterogeneity in the effect of Medicaid coverage on diastolic blood pressure and total cholesterol concentrations (sFigure D, sTable H, sTable I)#####
+newd$dbp<-newd$bp_dar_inp
+newd$chl<-newd$chl_inp
+target_vars2 <- c( "dbp", "chl") 
+for (vars in target_vars2) {
+  newd$outcome<-newd[[vars]]
+  newd.out<- newd[, which (colnames(newd) %in% 
+                             c( "person_id", "household_id", "randassign", "outcome",  "weight_total_inp", "nomedicaid"
+                             ))]
+  
+  newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+  newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+  
+  # Prepare dataset
+  Y <-  (newd.imp$outcome)
+  X <-  select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", 
+                            "weight_total_inp"))
+  Z <-  as.integer(newd.imp$randassign)
+  W <-  as.integer(newd.imp$nomedicaid)
+  weights<-newd.imp$weight_total_inp
+
+  # Prepare for data.splitting
+  # Assign a fold number to each observation.
+  # The argument 'clusters' in the next step will mimick K-fold cross-fitting.
+  num.folds <- folds.ivforest
+  n<-nrow(newd.imp)
+  
+  library(grf)
+  set.seed(Sys.time())
+  set.seed(seedset) 
+  folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+  
+  ivmodel <- instrumental_forest(X, Y, W, Z, honesty = TRUE, 
+                                 tune.parameters = "all",
+                                 sample.weights =  weights, 
+                                 num.threads = numthreadsset, 
+                                 seed = seed.ivforest[vars], 
+                                 clusters = folds)
+  assign(paste0("iv.forest_", vars), ivmodel, envir = .GlobalEnv)
+}
+# Save objects
+saveRDS(iv.forest_dbp, "intdat/object/iv.forest_dbp.obj")
+saveRDS(iv.forest_chl, "intdat/object/iv.forest_chl.obj")
+```
+
+```{r}
+#####Step 13-2: Additional analysis-4. Heterogeneity in the effect of Medicaid coverage on diastolic blood pressure and total cholesterol concentrations (sFigure D, sTable H, sTable I)#####
+if (load_ivforest == 1) {
+    # Load the necessary RDS files
+    iv.forest_dbp <- readRDS("intdatAsPublished/object/iv.forest_dbp.obj")
+    iv.forest_chl <- readRDS("intdatAsPublished/object/iv.forest_chl.obj")
+}
+
+# Calibration plot
+  #calculate RATE
+  for (vars in target_vars2) {
+  newd$outcome<-newd[[vars]]
+  newd.out<- newd[, which (colnames(newd) %in% 
+                             c( "person_id", "household_id", "randassign", "outcome",  "weight_total_inp", "nomedicaid"
+                             ))]
+  
+  newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+  newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+  
+  # Prepare dataset
+  X <-  select(newd.imp, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", 
+                            "weight_total_inp"))
+  # Number of rankings that the predictions will be ranking on 
+  # (e.g., 2 for above/below median estimated CATE, 5 for estimated CATE quintiles, etc.)
+  num.rankings <- rnk.ivforest
+  
+  # Prepare for data.splitting
+  # Assign a fold number to each observation.
+  # The argument 'clusters' in the next step will mimick K-fold cross-fitting.
+  num.folds <- folds.ivforest
+  n<-nrow(newd.imp)
+  
+  library(grf)
+  set.seed(Sys.time())
+  set.seed(seedset) 
+  folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+  
+  ivmodel <- get(paste0("iv.forest_", vars))
+  
+  priority.cate<-NA
+  for (fold in seq(num.folds)) {
+    priority.cate[folds == fold] <-  predict(ivmodel, X[folds == fold, ])$predictions
+  }
+  
+  # Rank observations *within each fold* into quintiles according to their CATE    predictions.
+  ranking <- rep(NA, n)
+  for (fold in seq(num.folds)) {
+    tau.hat.quantiles <- quantile(priority.cate[folds == fold], probs = seq(0, 1, by=1/num.rankings))
+    ranking[folds == fold] <- cut(priority.cate[folds == fold], tau.hat.quantiles, include.lowest=TRUE,labels=seq(num.rankings))
+  }
+  
+  # Empty list to hold models
+  models <- list()
+  rnk<-data.frame(1)
+  estimate<-data.frame(1)
+  lowCI<-data.frame(1)
+  highCI<-data.frame(1)
+  # Loop through percentiles
+  for (i in seq(1, 5, by=1)) {
+    newd_subset <- newd.imp[ranking==6-i, ]
+    model_subset<-ivreg(outcome~ nomedicaid+ as.factor(numhh_list) +gender_inp +age_inp|randassign+
+                          as.factor(numhh_list) +gender_inp +age_inp , weights=weight_total_inp, 
+                        data = newd_subset)
+    coef_target <- summary(model_subset)$coefficients
+    
+    rnk[[paste0("Q", i)]] <- paste0("Q", i)
+    estimate[[paste0("Q", i)]] <- coef_target["nomedicaid", "Estimate"]
+    lowCI[[paste0("Q", i)]]  <- coef_target["nomedicaid", "Estimate"]-1.96*coef_target["nomedicaid", "Std. Error"]
+    highCI[[paste0("Q", i)]]  <- coef_target["nomedicaid", "Estimate"]+1.96*coef_target["nomedicaid", "Std. Error"]
+  }
+  testimate<-data.frame(t(estimate))
+  tlowCI<-data.frame(t(lowCI))
+  thighCI<-data.frame(t(highCI))
+  trnk<-data.frame(t(rnk))
+  cal.plot<-as.data.frame(cbind(trnk, testimate, tlowCI, thighCI))
+  cal.plot <- cal.plot[-1, ]
+  
+  cp<-ggplot(cal.plot) +
+    aes(x = t.rnk., y = t.estimate.*(-1)) + 
+    #aes(x = ranking, y = estimate) + 
+    geom_point(position=position_dodge(0.2), size=3) +
+    geom_errorbar(aes(ymin=t.highCI.*(-1), ymax=t.lowCI.*(-1)), width=.2, position=position_dodge(0.2)) +
+    ylab("Local average treatment effect") + xlab("Ranking of estimated CLATEs") +
+    ggtitle("")+
+    theme_minimal() +
+    theme(legend.position="bottom", legend.title = element_blank())
+  assign(paste0("cp_", vars), cp, envir = .GlobalEnv)
+}
+
+cp_all<- grid.arrange(cp_dbp+ ggtitle('Diastolic Blood Pressure'), 
+                      cp_chl+ ggtitle('Total cholesterol levels'), 
+                      ncol=1)
+
+
+#Distribution of covariates according to predicted CATE
+for (vars in target_vars2) {
+set.seed(Sys.time())
+set.seed(seedset) 
+folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+ivmodel <- get(paste0("iv.forest_", vars))
+tau.hat<-NA
+for (fold in seq(num.folds)) {
+  tau.hat[folds == fold] <-  predict(ivmodel, X[folds == fold, ])$predictions
+}
+
+newd.table.temp <- newd.imp[, which(colnames(newd.imp) %in% 
+                                c("randassign", "age_inp", "gender_inp", "numhh_list", 
+                                  "ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+                                  "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+                                  "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+                                  "dep_dx_pre_lottery", "charg_tot_pre_ed", "ed_charg_tot_pre_ed",
+                                  "lessHS", "HSorGED", "hispanic_inp", "race_white_inp", 
+                                  "race_black_inp", "race_nwother_inp"))]
+
+catVars <- c("ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+             "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+             "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+             "dep_dx_pre_lottery", "lessHS", "HSorGED", "hispanic_inp", 
+             "race_white_inp", "race_black_inp", "race_nwother_inp")
+newd.table.temp[catVars] <- lapply(newd.table.temp[catVars], factor)
+
+# Labeling each covariates
+lookup <- c("age_inp" = "Age", "gender_inp" = "Gender", "numhh_list" = "# of people in household",
+            "ast_dx_pre_lottery" = "Asthma",   "dia_dx_pre_lottery" = "Diabetes", 
+            "hbp_dx_pre_lottery" = "Hypertension", "chl_dx_pre_lottery" = "Dyslipidemia", 
+            "ami_dx_pre_lottery" = "Heart Attack", "chf_dx_pre_lottery" = "Heart failure", 
+            "emp_dx_pre_lottery" = "Emphysema/COPD", "kid_dx_pre_lottery" = "Kidney failure", 
+            "cancer_dx_pre_lottery" = "Cancer", "dep_dx_pre_lottery" = "Depression", 
+            "charg_tot_pre_ed" = "Sum of total spending", "ed_charg_tot_pre_ed" = "Sum of ED spending", 
+            "lessHS" = "Less than high school",  "HSorGED" = "High school or GED", 
+            "hispanic_inp" = "Hispanic", "race_white_inp" = "Non-Hispanic White", 
+            "race_black_inp" = "Non-Hispanic Black", "race_nwother_inp" = "Other race and ethnicities",
+            "randassign" = "randassign")
+
+names(newd.table.temp) <- lookup[names(newd.table.temp)]
+newd.table.temp <- na.omit(newd.table.temp)
+
+#Define high-benefit group based on CLATE
+newd.table.temp$tau.hat<-tau.hat
+ranking <- rep(NA, nrow(newd.table.temp))
+for (fold in seq(num.folds)) {
+  tau.hat.quantiles <- quantile(tau.hat[folds == fold], probs = seq(0, 1, by=1/num.rankings))
+  ranking[folds == fold] <- cut(tau.hat[folds == fold], tau.hat.quantiles, include.lowest=TRUE,labels=seq(num.rankings))
+}
+newd.table.temp$ranking<-ranking
+
+newd.table.temp$Gender <- factor(newd.table.temp$Gender, levels=c("0","1"), labels=c("Male","Female"))
+
+##save intermediate data
+save.newd.table.temp<-newd.table.temp
+save.newd.table.temp[] <- lapply(save.newd.table.temp, function(x) {
+  if (is.list(x)) {
+    return(sapply(x, toString))
+  } else {
+    return(x)
+  }
+})
+write.csv(save.newd.table.temp, paste0("intdat/intdat_newd.table.STEP13", vars, ".csv"))
+# Check if published_paper_run equals 1
+if (published_paper_run == 1) {
+  # If true, execute the write.csv function
+  write.csv(save.newd.table.temp, paste0("intdatAsPublished/intdat_newd.table.STEP13", vars, ".csv"))
+}
+
+#reorder the variables
+newd.table.temp <- newd.table.temp[, c("Age",  "Gender", "Hispanic", "Non-Hispanic Black",  
+                 "Non-Hispanic White",  "Other race and ethnicities",   
+                 "Less than high school",   "High school or GED",   
+                 "# of people in household", "Sum of total spending", 
+                 "Sum of ED spending", "Asthma", "Diabetes",  
+                 "Hypertension", "Dyslipidemia", "Heart Attack", 
+                 "Heart failure", "Emphysema/COPD", "Kidney failure", 
+                 "Cancer", "Depression", "ranking")]
+
+sTable <- CreateTableOne(data = newd.table.temp, strata="ranking") 
+  print(sTable) %>%
+    write.csv(paste0("output/sTable_", vars, ".csv"))
+}
+#These tables shows distribution of covariates according to predicted CLATE for DBP and HbA1c
+```
+
+
+```{r}
+#####Step 14: Additional analysis-5. Baseline characteristics according to predicted take-up rates (sTable J)#####
+newd$outcome<-newd[["sbp"]]
+newd.out2<- newd[, which (colnames(newd) %in% 
+                           c("person_id", "household_id", "treatment",   "weight_total_inp",
+                             "ohp_all_ever_inperson", "outcome"
+                           ))]
+newd.comp <- merge(newd.preimp, newd.out2, by="person_id")
+newd.comp<-newd.comp[!is.na(newd.comp$outcome), ]
+
+#Build the prediction model using logistic regression models
+set.seed(Sys.time())
+set.seed(seedset) 
+pred.comp<-glm(ohp_all_ever_inperson ~ age_inp+gender_inp+numhh_list+ 
+                 ast_dx_pre_lottery+dia_dx_pre_lottery+ 
+                 hbp_dx_pre_lottery+chl_dx_pre_lottery+ami_dx_pre_lottery+chf_dx_pre_lottery+ 
+                 emp_dx_pre_lottery+kid_dx_pre_lottery+cancer_dx_pre_lottery+dep_dx_pre_lottery+
+                 lessHS+HSorGED+hispanic_inp+race_white_inp+race_black_inp+ 
+                 race_nwother_inp, 
+                data=newd.comp[newd.comp$treatment==1, ], family=binomial("logit"))
+
+
+newd.table.temp<- newd.comp[, which(colnames(newd.comp) %in% 
+                                 c("treatment", "age_inp", "gender_inp", "numhh_list", 
+                                     "ast_dx_pre_lottery", "dia_dx_pre_lottery", 
+                                     "hbp_dx_pre_lottery", "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery", 
+                                     "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery", "dep_dx_pre_lottery",
+                                     "charg_tot_pre_ed",
+                                     "ed_charg_tot_pre_ed",
+                                     "lessHS", "HSorGED", "hispanic_inp", "race_white_inp", "race_black_inp", 
+                                     "race_nwother_inp" ))]
+
+newd.table.temp$pred.prob.comp<-predict(pred.comp,  type="response", newdata=newd.table.temp)
+#summary(newd.table.temp$pred.prob.comp)
+pred.prob.comp<-newd.table.temp$pred.prob.comp
+num.rankings <- rnk.ivforest
+ranking <- rep(NA, nrow(newd.table.temp))
+pred.quantiles <- quantile(pred.prob.comp, probs = seq(0, 1, by=1/num.rankings))
+ranking <- cut(pred.prob.comp, pred.quantiles , include.lowest=TRUE,labels=seq(num.rankings))
+newd.table.temp$ranking<-ranking
+
+catVars <- c("ast_dx_pre_lottery", "dia_dx_pre_lottery", "hbp_dx_pre_lottery",
+             "chl_dx_pre_lottery", "ami_dx_pre_lottery", "chf_dx_pre_lottery",
+             "emp_dx_pre_lottery", "kid_dx_pre_lottery", "cancer_dx_pre_lottery",
+             "dep_dx_pre_lottery", "lessHS", "HSorGED", "hispanic_inp", 
+             "race_white_inp", "race_black_inp", "race_nwother_inp", "ranking")
+newd.table.temp[catVars] <- lapply(newd.table.temp[catVars], factor)
+
+lookup <- c("age_inp" = "Age", "gender_inp" = "Gender", "numhh_list" = "# of people in household",
+            "ast_dx_pre_lottery" = "Asthma",   "dia_dx_pre_lottery" = "Diabetes", 
+            "hbp_dx_pre_lottery" = "Hypertension", "chl_dx_pre_lottery" = "Dyslipidemia", 
+            "ami_dx_pre_lottery" = "Heart Attack", "chf_dx_pre_lottery" = "Heart failure", 
+            "emp_dx_pre_lottery" = "Emphysema/COPD", "kid_dx_pre_lottery" = "Kidney failure", 
+            "cancer_dx_pre_lottery" = "Cancer", "dep_dx_pre_lottery" = "Depression", 
+            "charg_tot_pre_ed" = "Sum of total spending", "ed_charg_tot_pre_ed" = "Sum of ED spending", 
+            "lessHS" = "Less than high school",  "HSorGED" = "High school or GED", 
+            "hispanic_inp" = "Hispanic", "race_white_inp" = "Non-Hispanic White", 
+            "race_black_inp" = "Non-Hispanic Black", "race_nwother_inp" = "Other race and ethnicities",
+            "ranking" = "ranking")
+
+names(newd.table.temp) <- lookup[names(newd.table.temp)]
+
+newd.table.temp$Gender <- factor(newd.table.temp$Gender, levels=c("0","1"), labels=c("Male","Female"))
+
+#reorder the variables
+newd.table.temp <- newd.table.temp[, c("Age",  "Gender", "Hispanic", "Non-Hispanic Black",  
+                 "Non-Hispanic White",  "Other race and ethnicities",   
+                 "Less than high school",   "High school or GED",   
+                 "# of people in household", "Sum of total spending", 
+                 "Sum of ED spending", "Asthma", "Diabetes",  
+                 "Hypertension", "Dyslipidemia", "Heart Attack", 
+                 "Heart failure", "Emphysema/COPD", "Kidney failure", 
+                 "Cancer", "Depression", "ranking")]
+
+sTable <- CreateTableOne(data = newd.table.temp, strata="ranking") 
+  print(sTable) %>%
+    write.csv(paste0("output/sTable_comp.csv"))
+
+# Calculate take-up rates
+for (rnk in seq(1, 5, by=1)) {
+  newd.test<-newd.comp
+  newd.test$ranking<-ranking
+  newd.subtest<-newd.test[newd.test$treatment==1, ]
+  newd_subtest_trt <- newd.subtest[newd.subtest$ranking==rnk, ]
+  print(mean(newd_subtest_trt$ohp_all_ever_inperson == 1))
+}
+
+```
+
+```{r}
+#####Step 15: Additional analysis-6. Difference between counterfactual and actual spending#####
+newd$outcome<-newd[["sbp"]]
+newd.out<- newd[, which (colnames(newd) %in% 
+                           c( "person_id", "household_id", "randassign", "outcome",  "weight_total_inp", "nomedicaid"
+                           ))]
+
+newd.imp <- merge(newd.preimp, newd.out, by="person_id")
+newd.imp<-newd.imp[!is.na(newd.imp$outcome), ]
+
+d.spend<-d[, which (colnames(d) %in% 
+                      c( "person_id", "charg_tot_ed" #"tot_med_spend_other_inp"
+                      ))]
+
+newd.spend <- merge(newd.imp, d.spend, by="person_id")
+
+# Prepare dataset
+X <-  select(newd.spend, -c("outcome", "randassign", "person_id", "household_id", "nomedicaid", 
+                            "weight_total_inp", "charg_tot_ed")) 
+# Prepare for data.splitting
+# Assign a fold number to each observation.
+# The argument 'clusters' in the next step will mimick K-fold cross-fitting.
+
+num.folds <- folds.ivforest
+n<-nrow(newd.spend)
+
+library(grf)
+set.seed(Sys.time())
+set.seed(seedset) 
+folds <- sample(c(1:num.folds), replace=TRUE, size=n)
+ivmodel <- get(paste0("iv.forest_", "sbp"))
+tau.hat<-NA
+for (fold in seq(num.folds)) {
+  tau.hat[folds == fold] <-  predict(ivmodel, X[folds == fold, ])$predictions
+}
+
+newd.spend$tau.hat<-tau.hat
+newd.spend$benefit<-0
+newd.spend$benefit[newd.spend$tau.hat>0]<-1 #notice this code should be changed based on outcome (increase or decrease)
+library(pscl)
+newd.spend$charg_tot_ed <- as.integer(newd.spend$charg_tot_ed)
+zip.model <- zeroinfl(charg_tot_ed ~ age_inp + gender_inp + numhh_list + 
+                        ast_dx_pre_lottery + dia_dx_pre_lottery + 
+                        hbp_dx_pre_lottery + chl_dx_pre_lottery + ami_dx_pre_lottery +
+                        chf_dx_pre_lottery + emp_dx_pre_lottery + 
+                        kid_dx_pre_lottery + cancer_dx_pre_lottery + 
+                        dep_dx_pre_lottery + lessHS + HSorGED + 
+                        hispanic_inp + race_white_inp + race_black_inp + 
+                        race_nwother_inp | age_inp + gender_inp + numhh_list + 
+                        ast_dx_pre_lottery + dia_dx_pre_lottery + 
+                        hbp_dx_pre_lottery + chl_dx_pre_lottery + ami_dx_pre_lottery +
+                        chf_dx_pre_lottery + emp_dx_pre_lottery + 
+                        kid_dx_pre_lottery + cancer_dx_pre_lottery + 
+                        dep_dx_pre_lottery + lessHS + HSorGED + 
+                        hispanic_inp + race_white_inp + race_black_inp + 
+                        race_nwother_inp, 
+                      data = newd.spend[newd.spend$nomedicaid == 0, ], 
+                      dist = "negbin")
+#summary(zip.model)
+
+newd.spend$po_charg<-predict(zip.model, newdata=newd.spend, type = "response")
+newd.spend$gap<-newd.spend$po_charg - newd.spend$charg_tot_pre_ed
+#summary(newd.spend$charg_tot_pre_ed)
+#summary(newd.spend$charg_tot_ed)
+#summary(newd.spend$po_charg)
+#summary(newd.spend$gap)
+t.test(newd.spend$gap[newd.spend$benefit==1], newd.spend$gap[newd.spend$benefit==0])
+```
+
+```{r}
+Sys.time()
+```
+
+

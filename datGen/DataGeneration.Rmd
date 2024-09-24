@@ -1,0 +1,220 @@
+---
+title: "DataGeneration for simulation example"
+author: "Kosuke Inoue"
+date: "2024-09-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+###R codes for Data generation for simulation example
+###Last update 2024/9/3 (Kosuke Inoue)
+
+#STEP 0: Define parameters & install packages
+#STEP 1: Simulate random assignment (lottery) and covariates
+#STEP 2: Simulate total and ED charges 
+#STEP 3: Simulate treatment (Medicaid coverage) affected by random assignment
+#STEP 4: Simulate outcomes affected by both treatment and covariates
+#STEP 5: Assemble the complete data frame
+```
+
+```{r}
+#STEP 0: Define parameters & install packages
+n <- 20745  # Define the number of observations
+seedsim <- 123456789
+
+install.packages("haven")
+library(haven)
+```
+
+```{r}
+#STEP 1: Simulate random assignment (lottery) and covariates
+## Random assignment ##
+set.seed(seedsim)  # Set seed for reproducibility
+treatment <- rbinom(n, 1, 0.5)
+
+## Covariates ##
+# Simulating 'person_id'
+person_id <- seq_len(n)
+
+# Simulating 'weight_total_inp'
+weight_total_inp <- rnorm(n, mean = 1, sd = 1)
+weight_total_inp <- pmax(pmin(weight_total_inp, 10.0), 0.1)
+
+# Simulating 'gender_inp'
+gender_inp <- rbinom(n, 1, prob = 0.566)
+
+# Simulating 'age_inp' with specific NA count
+age_inp <- rnorm(n, mean = 40.8, sd = (71 - 19) / 4)
+age_inp <- pmax(pmin(age_inp, 71), 19)
+na_indices1 <- sample(1:n, 8000)
+age_inp[na_indices1] <- NA  # Introducing NAs
+sc_age_inp <- ifelse(is.na(age_inp), NA, scale(age_inp, center = TRUE, scale = TRUE))
+
+# Household ID
+household_id <- sample(1:10000, n, replace = TRUE)  
+
+# Number of household members list
+numhh_list <- sample(1:3, n, replace = TRUE, prob = c(0.9, 0.075, 0.025))
+# Generate race categories based on the provided probabilities(The self-reported race & ethnicity categories were not exclusive because participants reported as many races and ethnic groups as they wished. )
+race_white_inp <- rbinom(n, 1, prob = 0.688) 
+race_black_inp <- rbinom(n, 1, prob = 0.103) 
+race_nwother_inp <- rbinom(n, 1, prob = 0.144) 
+hispanic_inp <- rbinom(n, 1, prob = 0.18)
+na_indices2 <- sample(1:n, 500)
+na_indices3 <- union(na_indices1, na_indices2)
+race_white_inp[na_indices3] <- NA
+race_black_inp[na_indices3] <- NA
+race_nwother_inp[na_indices3] <- NA
+hispanic_inp[na_indices3] <- NA
+
+# Binary medical conditions
+ast_dx_pre_lottery <- rbinom(n, 1, prob = 0.193)
+dia_dx_pre_lottery <- rbinom(n, 1, prob = 0.071)
+hbp_dx_pre_lottery <- rbinom(n, 1, prob = 0.182)
+chl_dx_pre_lottery <- rbinom(n, 1, prob = 0.127)
+ami_dx_pre_lottery <- rbinom(n, 1, prob = 0.02)
+chf_dx_pre_lottery <- rbinom(n, 1, prob = 0.011)
+emp_dx_pre_lottery = rbinom(n, 1, prob = 0.022)
+kid_dx_pre_lottery = rbinom(n, 1, prob = 0.019)
+cancer_dx_pre_lottery = rbinom(n, 1, prob = 0.043)
+dep_dx_pre_lottery = rbinom(n, 1, prob = 0.341)
+
+# Continuous and other variables
+bmi_inp <- rnorm(n, mean = 29.87, sd = (93.94 - 14.31) / 4)
+bmi_inp <- pmax(pmin(bmi_inp, 80), 15)
+sc_bmi_inp <- scale(bmi_inp, center = TRUE, scale = TRUE)  # Standardizing BMI
+
+cvd_risk_point <- runif(n, min = 0.010, max = 0.300)
+sc_cvd_risk_point <- scale(cvd_risk_point)  # Standardizing cardiovascular risk point
+
+# Educational and ethnic variables
+edu_inp <- sample(1:4, n, replace = TRUE, prob = c(0.25, 0.25, 0.25, 0.25))
+```
+
+```{r}
+#STEP 2: Simulate total and ED charges 
+set.seed(seedsim)  # Set seed for reproducibility
+ed_charg_tot_pre_ed <- ifelse(hispanic_inp == 1,
+                              rnorm(n, mean = 200, sd = 500 * 0.3),  
+                              rnorm(n, mean = 500, sd = 500))
+ed_charg_tot_pre_ed[ed_charg_tot_pre_ed<0] <- 0
+intercept_charg_tot <- 313
+coef_charg_tot <- 1.94
+residual_sd <- 5000
+charg_tot_pre_ed <- intercept_charg_tot + coef_charg_tot * ed_charg_tot_pre_ed + rnorm(n, mean = 0, sd = residual_sd)
+ed_charg_tot_pre_ed <- pmax(pmin(ed_charg_tot_pre_ed, 1000), 0)
+charg_tot_pre_ed <- pmax(pmin(charg_tot_pre_ed, 10000), 0)
+sc_ed_charg_tot_pre_ed <- scale(ed_charg_tot_pre_ed, center = TRUE, scale = TRUE)  # After NA introduction
+sc_charg_tot_pre_ed <- scale(charg_tot_pre_ed, center = TRUE, scale = TRUE)        # After NA introduction
+
+# Introducing NAs to both variables using the same indices
+na_indices4 <- sample(1000:n, 3000)
+ed_charg_tot_pre_ed[na_indices4] <- NA
+charg_tot_pre_ed[na_indices4] <- NA
+
+#Create charge after the randomization
+charg_tot_ed <- 1000 -0.0001* charg_tot_pre_ed + rnorm(n, mean = 0, sd = residual_sd)
+charg_tot_ed[charg_tot_ed < 0] <- 0
+sc_charg_tot_ed <- scale(charg_tot_ed)
+```
+
+
+```{r}
+#Step 3: Simulate treatment (Medicaid coverage) affected by random assignment
+diagnosis_data <- data.frame(
+  ast_dx_pre_lottery,
+  dia_dx_pre_lottery,
+  hbp_dx_pre_lottery,
+  chl_dx_pre_lottery,
+  ami_dx_pre_lottery,
+  chf_dx_pre_lottery,
+  emp_dx_pre_lottery,
+  kid_dx_pre_lottery,
+  cancer_dx_pre_lottery,
+  dep_dx_pre_lottery
+)
+sum_diagnosis <- rowSums(diagnosis_data)
+# Base probability for Q
+base_prob <- 0.3 + (0.3 * (sum_diagnosis / 10))  # Adjust base probability by scaled sum of diagnostics
+# Adjust probability based on hispanic_inp and gender_inp
+prob_Q <- ifelse(hispanic_inp == 0 & gender_inp == 1, base_prob + 0.2,
+                 ifelse(hispanic_inp == 1 & gender_inp == 1, base_prob + 0.1, base_prob))
+# Ensure probabilities are within [0.3, 0.6]
+prob_Q <- pmax(pmin(prob_Q, 0.6), 0.3)
+# Generate Q
+Q <- rbinom(n, 1, prob_Q)
+ohp_all_ever_inperson <- Q * treatment
+```
+
+
+```{r}
+#STEP 4: Simulate outcomes affected by both treatment, covariates, and interaction with charges
+set.seed(seedsim)  # Set seed for reproducibility
+compute_model <- function(tau_int, alpha1, alpha2, beta, int, gamma) {
+  tau <- tau_int + alpha1*sc_charg_tot_pre_ed  + alpha2*sc_charg_tot_pre_ed*sc_ed_charg_tot_pre_ed 
+  model_output <- beta * (gender_inp + 
+                          sc_age_inp + 
+                          ast_dx_pre_lottery + 
+                          dia_dx_pre_lottery + 
+                          hbp_dx_pre_lottery + 
+                          chl_dx_pre_lottery + 
+                          ami_dx_pre_lottery + 
+                          chf_dx_pre_lottery + 
+                          emp_dx_pre_lottery + 
+                          kid_dx_pre_lottery + 
+                          cancer_dx_pre_lottery + 
+                          dep_dx_pre_lottery + 
+                          edu_inp + 
+                          race_white_inp + 
+                          race_black_inp + 
+                          race_nwother_inp + 
+                          hispanic_inp + 
+                          numhh_list)
+
+  # Calculate Y based on the simplified formula
+  return(int + model_output + tau * ohp_all_ever_inperson + Q + gamma*rnorm(n))
+}
+
+bp_sar_inp <- compute_model(tau_int=-1.0, alpha1 = 8, alpha2 = 5, beta = 0.05, int = 160, gamma=10)
+bp_sar_inp <- pmax(pmin(bp_sar_inp, 200), 60)
+bp_dar_inp <- compute_model(tau_int=-1.0, alpha1 = 8, alpha2 = 5, beta = 0.05, int = 85, gamma=10)
+bp_dar_inp <- pmax(pmin(bp_dar_inp, 120), 40)
+a1c_inp <- compute_model(tau_int=-0.5, alpha1 = 1, alpha2 = 0.5, beta = 0.01, int = 6.0, gamma=2)
+a1c_inp <- pmax(pmin(a1c_inp, 15), 4)
+chl_inp <- compute_model(tau_int=-1.0, alpha1 = 8, alpha2 = 5, beta = 0.1, int = 200, gamma=10)
+chl_inp <- pmax(pmin(chl_inp, 220), 140)
+
+doc_num_incl_probe_inp <- compute_model(tau_int=2.0, alpha1 = 0, alpha2 = 0, beta = 0.1, int = 7, gamma=4)
+doc_num_incl_probe_inp <- pmax(pmin(doc_num_incl_probe_inp, 20), 0)
+doc_num_mod_inp <-doc_num_incl_probe_inp
+rx_num_mod_inp <- compute_model(tau_int=0.5, alpha1 = 0, alpha2 = 0, beta = 0.1, int = 3, gamma=2)
+rx_num_mod_inp <- pmax(pmin(rx_num_mod_inp, 10), 0)
+```
+
+```{r}
+#STEP 5: Assemble the complete data frame
+data_sim <- data.frame(
+  person_id, treatment, ohp_all_ever_inperson, weight_total_inp, gender_inp, age_inp, ast_dx_pre_lottery, dia_dx_pre_lottery,
+  hbp_dx_pre_lottery, chl_dx_pre_lottery, ami_dx_pre_lottery, chf_dx_pre_lottery, emp_dx_pre_lottery, kid_dx_pre_lottery, cancer_dx_pre_lottery, dep_dx_pre_lottery, 
+  bmi_inp, ed_charg_tot_pre_ed, charg_tot_pre_ed, cvd_risk_point, doc_num_incl_probe_inp,doc_num_mod_inp,  rx_num_mod_inp, 
+  edu_inp, race_white_inp, race_black_inp, race_nwother_inp, hispanic_inp, numhh_list, household_id,
+  bp_sar_inp , a1c_inp, bp_dar_inp, chl_inp, charg_tot_ed
+)
+
+# Print summary to check distributions and relationships
+summary(data_sim)
+write_dta(data_sim, "SIMdata_for_analysis.dta")
+
+#summary(ivreg(bp_sar_inp~ohp_all_ever_inperson| treatment))
+#summary(ivreg(bp_sar_inp~ohp_all_ever_inperson*charg_tot_pre_ed| treatment*charg_tot_pre_ed))
+#summary(ivreg(bp_dar_inp~ohp_all_ever_inperson| treatment))
+#summary(ivreg(bp_dar_inp~ohp_all_ever_inperson*charg_tot_pre_ed| treatment*charg_tot_pre_ed))
+#summary(ivreg(a1c_inp~ohp_all_ever_inperson| treatment))
+#summary(ivreg(a1c_inp~ohp_all_ever_inperson*charg_tot_pre_ed| treatment*charg_tot_pre_ed))
+#summary(ivreg(chl_inp~ohp_all_ever_inperson| treatment))
+#summary(ivreg(chl_inp~ohp_all_ever_inperson*charg_tot_pre_ed| treatment*charg_tot_pre_ed))
+```

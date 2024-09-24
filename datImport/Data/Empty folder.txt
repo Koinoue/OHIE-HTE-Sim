@@ -1,0 +1,2 @@
+This folder is empty in this repository.
+The original data can be downloaded from either NBER or Harvard Dataverse.
