@@ -1,7 +1,7 @@
 # OHIE-HTE-Simulation
 
 This is the code for "Heterogeneous effects of Medicaid coverage on cardiovascular risk factors: secondary analysis of randomized controlled trial (Inoue K, Athey S, Baicker K, and Tsugawa Y)" published in <i>BMJ 2024;386:e079377</i>.<br/>
-
+https://www.bmj.com/content/386/bmj-2024-079377
  
 
 In this repository, we include the code necessary to replicate the results from our paper and to test the code on simulated data. To use the code, the user should clone the repository into a directory on their local machine, and the scripts and notebooks can be run within that directory structure. The authors of the original studies analyzing the Oregon Health Insurance Experiment (OHIE) have made the data publicly available.  For users who have not obtained the OHIE data, we created a simulated dataset in order to demonstrate the code and its functionality. This code will run using only the data files provided in this repository. To replicate the manuscript results using the OHIE data, it is necessary to download the original data from either NBER or Harvard Dataverse and follow the instructions below.<br/>
